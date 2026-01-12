@@ -74,13 +74,18 @@ try {
     # Build for each platform
     Write-Info "`nBuilding for multiple platforms..."
     
-    $BuiltBinaries = @()
+    $BuiltTargets = @()
     
     foreach ($Target in $Targets) {
-        $OutputName = "gopls-$($Target.OS)-$($Target.Arch)$($Target.Ext)"
-        $OutputPath = Join-Path $BinDir $OutputName
+        $PlatformDir = Join-Path $BinDir $Target.OS
+        $ArchDir = Join-Path $PlatformDir $Target.Arch
+        $OutputName = "gopls$($Target.Ext)"
+        $OutputPath = Join-Path $ArchDir $OutputName
         
-        Write-Info "Building $OutputName..."
+        Write-Info "Building for $($Target.OS)/$($Target.Arch)..."
+        
+        # Create platform/arch directory
+        New-Item -ItemType Directory -Path $ArchDir -Force | Out-Null
         
         $env:GOOS = $Target.OS
         $env:CGO_ENABLED = "0"
@@ -92,30 +97,41 @@ try {
             $Size = (Get-Item $OutputPath).Length / 1MB
             $SizeFormatted = "{0:N2}" -f $Size
             Write-Success "  [OK] Built successfully ($SizeFormatted MB)"
-            $BuiltBinaries += $OutputName
+            $BuiltTargets += @{
+                OS = $Target.OS
+                Arch = $Target.Arch
+                Dir = $ArchDir
+            }
         } else {
-            Write-Error "  [FAIL] Build failed for $OutputName"
+            Write-Error "  [FAIL] Build failed for $($Target.OS)/$($Target.Arch)"
         }
     }
 
     # Return to root directory
     Pop-Location
 
-    # Create tar.gz archives for each binary
+    # Create tar.gz archives for each platform/arch
     Write-Info "`nCreating tar.gz archives..."
-    Push-Location $BinDir
     
     $Archives = @()
     
-    foreach ($BinaryName in $BuiltBinaries) {
-        $ArchiveName = "$BinaryName.tar.gz"
+    foreach ($Target in $BuiltTargets) {
+        $ArchiveName = "gopls-$($Target.OS)-$($Target.Arch).tar.gz"
+        $ArchivePath = Join-Path $BinDir $ArchiveName
+        
         Write-Info "Creating $ArchiveName..."
         
-        # Create archive using tar (available in Windows 10+)
-        tar -czf $ArchiveName $BinaryName
+        # Change to bin directory to create archive with relative paths
+        Push-Location $BinDir
         
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $ArchiveName)) {
-            $ArchiveSize = (Get-Item $ArchiveName).Length / 1MB
+        # Create archive with platform/arch folder structure
+        $RelativePath = Join-Path $Target.OS $Target.Arch
+        tar -czf $ArchiveName $RelativePath
+        
+        Pop-Location
+        
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $ArchivePath)) {
+            $ArchiveSize = (Get-Item $ArchivePath).Length / 1MB
             $ArchiveSizeFormatted = "{0:N2}" -f $ArchiveSize
             Write-Success "  [OK] Created $ArchiveName ($ArchiveSizeFormatted MB)"
             $Archives += $ArchiveName
@@ -123,8 +139,6 @@ try {
             Write-Error "  [FAIL] Failed to create $ArchiveName"
         }
     }
-    
-    Pop-Location
 
     # Create GitHub Release
     Write-Info "`nCreating GitHub Release $Version..."
@@ -166,7 +180,7 @@ try {
 
     # Summary
     Write-Info "`n=== Build and Release Summary ==="
-    Write-Success "Binaries built: $($BuiltBinaries.Count)"
+    Write-Success "Binaries built: $($BuiltTargets.Count)"
     Write-Success "Archives created: $($Archives.Count)"
     Write-Success "Release version: $Version"
     
@@ -185,6 +199,14 @@ try {
             $SizeFormatted = "{0:N2}" -f $Size
             Write-Host "  - $Archive ($SizeFormatted MB)"
         }
+    }
+    
+    Write-Info "`nDirectory structure:"
+    Write-Host "  bin/" -ForegroundColor Yellow
+    foreach ($Target in $BuiltTargets) {
+        Write-Host "    $($Target.OS)/" -ForegroundColor Yellow
+        Write-Host "      $($Target.Arch)/" -ForegroundColor Yellow
+        Write-Host "        gopls$($Target.Ext)" -ForegroundColor Green
     }
     
     Write-Info "`nTo fetch the tag locally, run:"
