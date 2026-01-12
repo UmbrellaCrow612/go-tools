@@ -1,8 +1,10 @@
-# build-and-package.ps1
-# Build gopls for multiple platforms and compress the output
+# build-and-release.ps1
+# Build gopls for multiple platforms and upload to GitHub Release
 
 param(
-    [string]$Version = "0.0.1"
+    [string]$Version = "v0.0.1",
+    [switch]$Draft,
+    [string]$Title = ""
 )
 
 # Color output functions
@@ -25,7 +27,16 @@ $Targets = @(
     @{ OS = "darwin"; Arch = "arm64"; Ext = "" }
 )
 
-Write-Info "=== Starting Build Process ==="
+Write-Info "=== Starting Build and Release Process ==="
+
+# Check if gh CLI is installed
+Write-Info "Checking for GitHub CLI..."
+$ghInstalled = Get-Command gh -ErrorAction SilentlyContinue
+if (-not $ghInstalled) {
+    Write-Error "GitHub CLI (gh) is not installed. Please install it from https://cli.github.com/"
+    exit 1
+}
+Write-Success "GitHub CLI found"
 
 # Check if gopls directory exists
 if (-not (Test-Path $GoplsDir)) {
@@ -63,6 +74,8 @@ try {
     # Build for each platform
     Write-Info "`nBuilding for multiple platforms..."
     
+    $BuiltBinaries = @()
+    
     foreach ($Target in $Targets) {
         $OutputName = "gopls-$($Target.OS)-$($Target.Arch)$($Target.Ext)"
         $OutputPath = Join-Path $BinDir $OutputName
@@ -79,6 +92,7 @@ try {
             $Size = (Get-Item $OutputPath).Length / 1MB
             $SizeFormatted = "{0:N2}" -f $Size
             Write-Success "  [OK] Built successfully ($SizeFormatted MB)"
+            $BuiltBinaries += $OutputName
         } else {
             Write-Error "  [FAIL] Build failed for $OutputName"
         }
@@ -87,46 +101,99 @@ try {
     # Return to root directory
     Pop-Location
 
-    # Compress bin folder
-    Write-Info "`nCompressing bin folder..."
-    $ArchiveName = "gopls-binaries-v$Version.zip"
-    $ArchivePath = Join-Path $RootDir $ArchiveName
-
-    # Remove existing archive if it exists
-    if (Test-Path $ArchivePath) {
-        Remove-Item $ArchivePath -Force
-    }
-
-    # Create compressed archive
-    Compress-Archive -Path $BinDir -DestinationPath $ArchivePath -CompressionLevel Optimal
+    # Create tar.gz archives for each binary
+    Write-Info "`nCreating tar.gz archives..."
+    Push-Location $BinDir
     
-    if (Test-Path $ArchivePath) {
-        $ArchiveSize = (Get-Item $ArchivePath).Length / 1MB
-        $ArchiveSizeFormatted = "{0:N2}" -f $ArchiveSize
-        Write-Success "Archive created: $ArchiveName ($ArchiveSizeFormatted MB)"
+    $Archives = @()
+    
+    foreach ($BinaryName in $BuiltBinaries) {
+        $ArchiveName = "$BinaryName.tar.gz"
+        Write-Info "Creating $ArchiveName..."
+        
+        # Create archive using tar (available in Windows 10+)
+        tar -czf $ArchiveName $BinaryName
+        
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $ArchiveName)) {
+            $ArchiveSize = (Get-Item $ArchiveName).Length / 1MB
+            $ArchiveSizeFormatted = "{0:N2}" -f $ArchiveSize
+            Write-Success "  [OK] Created $ArchiveName ($ArchiveSizeFormatted MB)"
+            $Archives += $ArchiveName
+        } else {
+            Write-Error "  [FAIL] Failed to create $ArchiveName"
+        }
+    }
+    
+    Pop-Location
+
+    # Create GitHub Release
+    Write-Info "`nCreating GitHub Release $Version..."
+    
+    Push-Location $RootDir
+    
+    # Build the gh release create command
+    $releaseArgs = @("release", "create", $Version, "--generate-notes")
+    
+    if ($Draft) {
+        $releaseArgs += "--draft"
+        Write-Info "Creating as draft release"
+    }
+    
+    if ($Title -ne "") {
+        $releaseArgs += "--title"
+        $releaseArgs += $Title
+    }
+    
+    # Add all archives as arguments
+    foreach ($Archive in $Archives) {
+        $ArchivePath = Join-Path $BinDir $Archive
+        $releaseArgs += $ArchivePath
+    }
+    
+    Write-Info "Uploading $($Archives.Count) archives to GitHub..."
+    
+    # Execute gh release create
+    & gh @releaseArgs
+    
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "`nRelease created successfully!"
     } else {
-        Write-Error "Failed to create archive"
+        Write-Error "Failed to create release"
         exit 1
     }
+    
+    Pop-Location
 
     # Summary
-    Write-Info "`n=== Build Summary ==="
-    Write-Success "Binaries built: $($Targets.Count)"
-    Write-Success "Output directory: $BinDir"
-    Write-Success "Archive: $ArchivePath"
+    Write-Info "`n=== Build and Release Summary ==="
+    Write-Success "Binaries built: $($BuiltBinaries.Count)"
+    Write-Success "Archives created: $($Archives.Count)"
+    Write-Success "Release version: $Version"
     
-    # List all binaries
-    Write-Info "`nBuilt binaries:"
-    Get-ChildItem $BinDir | ForEach-Object {
-        $Size = $_.Length / 1MB
-        $SizeFormatted = "{0:N2}" -f $Size
-        Write-Host "  - $($_.Name) ($SizeFormatted MB)"
+    if ($Draft) {
+        Write-Info "Release Status: DRAFT (not published)"
+    } else {
+        Write-Success "Release Status: PUBLISHED"
     }
+    
+    # List all archives
+    Write-Info "`nUploaded archives:"
+    foreach ($Archive in $Archives) {
+        $ArchivePath = Join-Path $BinDir $Archive
+        if (Test-Path $ArchivePath) {
+            $Size = (Get-Item $ArchivePath).Length / 1MB
+            $SizeFormatted = "{0:N2}" -f $Size
+            Write-Host "  - $Archive ($SizeFormatted MB)"
+        }
+    }
+    
+    Write-Info "`nTo fetch the tag locally, run:"
+    Write-Host "  git fetch --tags origin" -ForegroundColor Yellow
 
 } catch {
-    Write-Error "Build process failed: $_"
+    Write-Error "Build and release process failed: $_"
     Pop-Location
     exit 1
 }
 
-Write-Success "`n=== Build Complete ==="
+Write-Success "`n=== Build and Release Complete ==="
